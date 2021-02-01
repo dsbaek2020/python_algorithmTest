@@ -1,4 +1,6 @@
 #find who is policeOfficer
+#author: ChoiSY
+#date: 2021.2.1
 graph = {}
 graph["you"] = [{'name': "ana" , 'job': "artist"},{'name': "bob" , 'job': "chef"},{'name': "cat" , 'job': "pianist"}]
 graph["bob"] = [{'name': "dao", 'job': "dentist"},{'name': "evy", 'job': "model"}]
