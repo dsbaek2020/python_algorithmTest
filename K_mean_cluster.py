@@ -15,10 +15,10 @@ def plotScatter(dataSet, Clusters, centroids):
     markers = ['o', 'x', 'x', 'x']
 
     clusterNum = 0
-    for students in Clusters:  # student is list
+    for students in Clusters:  # student is list of student number
         x = []
         y = []
-        for student in students:
+        for student in students: #Add exam data to x,y list  
             x.append(dataSet[student][0])
             y.append(dataSet[student][1])
 
@@ -29,14 +29,19 @@ def plotScatter(dataSet, Clusters, centroids):
         plt.scatter(centroids[clusterNum][0],centroids[clusterNum][1], color=colors[clusterNum],
                     marker='v',
                     label='exam')
-
+        
+        
+        #draw line from centroid to data point
+        for i in range(len(x)):
+            pointStudent = [x[i], y[i]]
+            pointCentroid = [centroids[clusterNum][0],centroids[clusterNum][1]]
+            plt.plot([pointCentroid[0],pointStudent[0]],
+                      [pointCentroid[1],pointStudent[1]], color=colors[clusterNum], linestyle="--")
         clusterNum = clusterNum + 1
-
-
 
     plt.grid()
     plt.show()
-
+    
 
 def euclidD(point1, point2):
     total = 0
