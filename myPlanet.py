@@ -1,3 +1,6 @@
+#만든사람 이름과 이 파일에 대해서 간략히 요약 설명해보세요~
+
+
 from time import sleep
 
 class Planet :  # Make planet class
