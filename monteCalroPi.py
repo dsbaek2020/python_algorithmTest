@@ -1,4 +1,5 @@
-
+#만든사람: 최요환
+#2023. 4. 6(화)
 
 
 from turtle import Turtle
