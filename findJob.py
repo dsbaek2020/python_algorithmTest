@@ -4,7 +4,6 @@ Author: ChoiSY
 Date: 2021.2.1
 """
 
-from collections import deque
 from typing import Optional
 
 
@@ -34,6 +33,8 @@ def bfs_find_one(start_name: str, role: str, people: dict[str, Person]) -> Optio
 
     BFS is a graph traversal strategy that explores all neighbors at the present depth prior to moving on to nodes at the next level.
     This approach ensures the shortest path to a person with the given job is found in terms of number of "friend" connections.
+
+    Note: In this implementation, a Python list is used as a FIFO queue with append() for enqueue and pop(0) for dequeue.
 
     Parameters:
     - start_name (str): The name of the person from which the search begins.
@@ -96,11 +97,11 @@ def bfs_find_one(start_name: str, role: str, people: dict[str, Person]) -> Optio
 
     # Initialize queue with start_person
     # queue is a FIFO structure for BFS traversal
-    queue = deque([start_person])
+    queue = [start_person]
 
     while queue:
         # Dequeue the person at the front of the queue
-        person = queue.popleft()
+        person = queue.pop(0)
 
         # Check if this person has the job we're looking for
         if person.is_job(role):
