@@ -294,6 +294,76 @@ def visualize_people_graph(
     else:
         plt.show()
 
+def to_networkx_digraph(people: dict[str, Person]):
+    """
+    Constructs and returns a networkx.DiGraph from people dictionary.
+    Nodes are labeled by name and have 'job' attribute.
+    Directed edges correspond to friends relationships.
+    """
+    import networkx as nx
+
+    G = nx.DiGraph()
+    for name, person in people.items():
+        G.add_node(name, job=person.job)
+    for name, person in people.items():
+        for friend in person.friends:
+            G.add_edge(name, friend.name)
+    return G
+
+def visualize_with_networkx(
+    people: dict[str, Person],
+    layout: str = "spring",
+    figsize: tuple[float, float] = (8, 8),
+    node_color: str = "#4C78A8",
+    edge_color: str = "#999999",
+    font_size: int = 9,
+    save_path: str | None = None,
+) -> None:
+    """
+    Visualize the social graph using networkx layout algorithms and matplotlib.
+
+    Parameters:
+    - people: Dict[str, Person]
+    - layout: 'spring', 'kamada_kawai', 'circular', or 'shell'
+    - figsize: figure size tuple
+    - node_color: node color string
+    - edge_color: edge color string
+    - font_size: font size for labels
+    - save_path: if given, save figure to path, else show
+    """
+    import networkx as nx
+    import matplotlib.pyplot as plt
+
+    G = to_networkx_digraph(people)
+
+    if layout == "spring":
+        pos = nx.spring_layout(G)
+    elif layout == "kamada_kawai":
+        pos = nx.kamada_kawai_layout(G)
+    elif layout == "circular":
+        pos = nx.circular_layout(G)
+    elif layout == "shell":
+        pos = nx.shell_layout(G)
+    else:
+        raise ValueError(f"Unsupported layout: {layout}")
+
+    plt.figure(figsize=figsize)
+    ax = plt.gca()
+    ax.set_aspect('equal')
+    plt.axis('off')
+
+    nx.draw_networkx_edges(G, pos, edge_color=edge_color, arrows=True, arrowstyle='-|>', arrowsize=15, width=1.0, ax=ax)
+    nx.draw_networkx_nodes(G, pos, node_color=node_color, node_size=300, ax=ax)
+
+    labels = {n: f"{n}\n({G.nodes[n]['job']})" for n in G.nodes}
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=font_size, ax=ax)
+
+    plt.tight_layout()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    else:
+        plt.show()
+
 # Build people instances
 people = {
     "you": Person("you", "unknown"),
@@ -335,4 +405,7 @@ if __name__ == "__main__":
         print("No police officer found.")
 
     # Example: visualize the graph (uncomment to use)
-    visualize_people_graph(people, figsize=(7, 7), layout="circular", show_arrows=True, font_size=10)
+    #visualize_people_graph(people, figsize=(7, 7), layout="circular", show_arrows=True, font_size=10)
+    # Example: visualize with networkx (uncomment to use)
+    visualize_with_networkx(people, layout='spring', figsize=(7,7), font_size=10)
+
