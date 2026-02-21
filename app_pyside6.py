@@ -5,6 +5,7 @@ from findJob.py in real time (timer hook), up to step 4 as requested.
 """
 
 import sys
+import faulthandler
 from typing import Any
 
 from PySide6.QtWidgets import (
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QPen, QBrush, QFont,
+    QColor, QPen, QBrush, QFont, QPainter,
     QPainterPath,
     QWheelEvent, QMouseEvent,
 )
@@ -82,16 +83,19 @@ class GraphView(QGraphicsView):
         self.people = people_dict
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
+        self.scene.setItemIndexMethod(QGraphicsScene.NoIndex)
         self.node_items: dict[str, tuple] = {}  # name -> (ellipseItem, labelItem, rectItem)
         self.edge_items: list[dict] = []  # dict with keys: path_item, arrow_item, src, dst
         self.use_networkx_layout = HAS_NX  # toggle: use nx layout if available
         self.selected_name: str | None = None
         self._panning = False
         self._pan_start_pos = None
-        self.setRenderHint(self.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.Antialiasing, True)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self._rebuild_pending = False
+        self._building = False
         self._build_scene()
 
     def _job_color(self, job: str) -> QColor:
@@ -107,111 +111,124 @@ class GraphView(QGraphicsView):
         return colormap.get(job.lower(), QColor("#999999"))
 
     def _clear_scene(self):
+        self.scene.clearSelection()
         self.scene.clear()
         self.node_items.clear()
         self.edge_items.clear()
         self.selected_name = None
 
     def _build_scene(self):
-        local_people = dict(self.people)
-        self._clear_scene()
-        # Compute positions: networkx spring layout if available, else simple hierarchical
-        positions: dict[str, tuple[float, float]]
-        if self.use_networkx_layout:
-            try:
-                G = self._to_networkx()
-                positions = nx.spring_layout(G)
-                positions = {n: (x * 300.0, y * 300.0) for n, (x, y) in positions.items()}
-            except Exception:
+        if getattr(self, "_building", False):
+            return
+        self._building = True
+        try:
+            self._clear_scene()
+            # Snapshot to avoid concurrent mutations during rebuild
+            local_people = dict(self.people)
+            positions: dict[str, tuple[float, float]]
+            if self.use_networkx_layout:
+                try:
+                    G = self._to_networkx()
+                    positions = nx.spring_layout(G)
+                    # scale positions to reasonable scene coordinates
+                    positions = {n: (float(x) * 300.0, float(y) * 300.0) for n, (x, y) in positions.items()}
+                except Exception:
+                    positions = self._hierarchical_positions()
+            else:
                 positions = self._hierarchical_positions()
-        else:
-            positions = self._hierarchical_positions()
 
-        # Draw nodes
-        for name, (x, y) in positions.items():
-            self._add_node(name, x, y)
+            # Draw nodes
+            for name, (x, y) in positions.items():
+                if name in local_people:
+                    self._add_node(name, x, y)
 
-        # Draw edges with curved lines and arrowheads
-        pen = QPen(EDGE_COLOR)
-        pen.setWidthF(1.0)
-        arrow_brush = QBrush(EDGE_COLOR)
-        for src_name, src_person in local_people.items():
-            if src_name not in self.node_items:
-                continue
-            src_ellipse, _, _ = self.node_items[src_name]
-            # ellipse rect center is relative to scene coordinates already set
-            src_center = src_ellipse.rect().center()
-            sx = src_ellipse.pos().x() + src_center.x()
-            sy = src_ellipse.pos().y() + src_center.y()
-            for friend in src_person.friends:
-                dst_name = friend.name
-                if dst_name not in self.node_items:
+            # Draw edges with curved lines and arrowheads
+            pen = QPen(EDGE_COLOR)
+            pen.setWidthF(1.0)
+            arrow_brush = QBrush(EDGE_COLOR)
+            for src_name, src_person in local_people.items():
+                if src_name not in self.node_items:
                     continue
-                dst_ellipse, _, _ = self.node_items[dst_name]
-                dst_center = dst_ellipse.rect().center()
-                dx = dst_ellipse.pos().x() + dst_center.x()
-                dy = dst_ellipse.pos().y() + dst_center.y()
+                src_ellipse, _, _ = self.node_items[src_name]
+                # ellipse rect center is relative to scene coordinates already set
+                src_center = src_ellipse.rect().center()
+                sx = src_ellipse.pos().x() + src_center.x()
+                sy = src_ellipse.pos().y() + src_center.y()
+                friends = getattr(src_person, "friends", []) or []
+                for friend in friends:
+                    dst_name = getattr(friend, "name", None)
+                    if not isinstance(dst_name, str):
+                        continue
+                    if dst_name not in self.node_items:
+                        continue
+                    dst_ellipse, _, _ = self.node_items[dst_name]
+                    dst_center = dst_ellipse.rect().center()
+                    dx = dst_ellipse.pos().x() + dst_center.x()
+                    dy = dst_ellipse.pos().y() + dst_center.y()
 
-                # Create curved path from (sx, sy) to (dx, dy)
-                path = QPainterPath()
-                path.moveTo(sx, sy)
-                mid_x = (sx + dx) / 2
-                mid_y = (sy + dy) / 2
-                # Calculate perpendicular offset for curve
-                offset = 30
-                vx = dx - sx
-                vy = dy - sy
-                length = (vx**2 + vy**2)**0.5
-                if length == 0:
-                    length = 1
-                # Perp unit vector
-                px = -vy / length
-                py = vx / length
-                cx = mid_x + px * offset
-                cy = mid_y + py * offset
-                path.quadTo(cx, cy, dx, dy)
+                    # Create curved path from (sx, sy) to (dx, dy)
+                    path = QPainterPath()
+                    path.moveTo(sx, sy)
+                    mid_x = (sx + dx) / 2
+                    mid_y = (sy + dy) / 2
+                    # Calculate perpendicular offset for curve
+                    offset = 30
+                    vx = dx - sx
+                    vy = dy - sy
+                    length = (vx**2 + vy**2)**0.5
+                    if length == 0:
+                        length = 1
+                    # Perp unit vector
+                    px = -vy / length
+                    py = vx / length
+                    cx = mid_x + px * offset
+                    cy = mid_y + py * offset
+                    path.quadTo(cx, cy, dx, dy)
 
-                path_item = QGraphicsPathItem(path)
-                path_item.setPen(pen)
-                self.scene.addItem(path_item)
+                    path_item = QGraphicsPathItem(path)
+                    path_item.setPen(pen)
+                    self.scene.addItem(path_item)
 
-                # Arrowhead at (dx, dy)
-                arrow_size = 10
-                # Direction vector from control point to end point
-                dir_x = dx - cx
-                dir_y = dy - cy
-                dir_len = (dir_x**2 + dir_y**2) ** 0.5
-                if dir_len == 0:
-                    dir_len = 1
-                dir_x /= dir_len
-                dir_y /= dir_len
-                # Compute two points for arrowhead base
-                left_x = dx - dir_x * arrow_size - dir_y * (arrow_size / 2)
-                left_y = dy - dir_y * arrow_size + dir_x * (arrow_size / 2)
-                right_x = dx - dir_x * arrow_size + dir_y * (arrow_size / 2)
-                right_y = dy - dir_y * arrow_size - dir_x * (arrow_size / 2)
+                    # Arrowhead at (dx, dy)
+                    arrow_size = 10
+                    # Direction vector from control point to end point
+                    dir_x = dx - cx
+                    dir_y = dy - cy
+                    dir_len = (dir_x**2 + dir_y**2) ** 0.5
+                    if dir_len == 0:
+                        dir_len = 1
+                    dir_x /= dir_len
+                    dir_y /= dir_len
+                    # Compute two points for arrowhead base
+                    left_x = dx - dir_x * arrow_size - dir_y * (arrow_size / 2)
+                    left_y = dy - dir_y * arrow_size + dir_x * (arrow_size / 2)
+                    right_x = dx - dir_x * arrow_size + dir_y * (arrow_size / 2)
+                    right_y = dy - dir_y * arrow_size - dir_x * (arrow_size / 2)
 
-                arrow_path = QPainterPath()
-                arrow_path.moveTo(dx, dy)
-                arrow_path.lineTo(left_x, left_y)
-                arrow_path.lineTo(right_x, right_y)
-                arrow_path.closeSubpath()
+                    arrow_path = QPainterPath()
+                    arrow_path.moveTo(dx, dy)
+                    arrow_path.lineTo(left_x, left_y)
+                    arrow_path.lineTo(right_x, right_y)
+                    arrow_path.closeSubpath()
 
-                arrow_item = QGraphicsPathItem(arrow_path)
-                arrow_item.setBrush(arrow_brush)
-                arrow_item.setPen(QPen(Qt.NoPen))
-                self.scene.addItem(arrow_item)
+                    arrow_item = QGraphicsPathItem(arrow_path)
+                    arrow_item.setBrush(arrow_brush)
+                    arrow_item.setPen(QPen(Qt.NoPen))
+                    self.scene.addItem(arrow_item)
 
-                self.edge_items.append({
-                    "path_item": path_item,
-                    "arrow_item": arrow_item,
-                    "src": src_name,
-                    "dst": dst_name,
-                })
+                    self.edge_items.append({
+                        "path_item": path_item,
+                        "arrow_item": arrow_item,
+                        "src": src_name,
+                        "dst": dst_name,
+                    })
+        finally:
+            self._building = False
 
     def _add_node(self, name: str, x: float, y: float):
         radius = 18
-        job = self.people[name].job
+        person = self.people.get(name)
+        job = getattr(person, "job", "unknown") if person is not None else "unknown"
         color = self._job_color(job)
         ellipse = self.scene.addEllipse(-radius, -radius, radius*2, radius*2,
                                         QPen(Qt.black), QBrush(color))
@@ -246,9 +263,9 @@ class GraphView(QGraphicsView):
             self._pan_start_pos = event.pos()
             event.accept()
             return
-        pos = event.position() if hasattr(event, "position") else event.pos()
-        scene_pos = self.mapToScene(pos.toPoint())
-        items = self.scene.items(scene_pos)
+        pos_any = event.position() if hasattr(event, "position") else event.pos()
+        pos_point = pos_any.toPoint() if hasattr(pos_any, "toPoint") else pos_any
+        items = self.items(pos_point)
         # Find first ellipse item
         selected_name = None
         for item in items:
@@ -340,8 +357,10 @@ class GraphView(QGraphicsView):
             if n != name and not (
                 any((edge["src"] == name and edge["dst"] == n) or (edge["dst"] == name and edge["src"] == n) for edge in self.edge_items)
             ):
+                person_n = self.people.get(n)
+                job_n = getattr(person_n, "job", "unknown") if person_n is not None else "unknown"
                 e.setPen(QPen(Qt.black))
-                e.setBrush(QBrush(self._job_color(self.people[n].job)))
+                e.setBrush(QBrush(self._job_color(job_n)))
                 r.setBrush(QBrush(LABEL_BG))
 
     def _clear_highlight(self):
@@ -350,8 +369,10 @@ class GraphView(QGraphicsView):
         # Reset node
         ellipse, label, rect = self.node_items.get(self.selected_name, (None, None, None))
         if ellipse:
+            person_sel = self.people.get(self.selected_name)
+            job_sel = getattr(person_sel, "job", "unknown") if person_sel is not None else "unknown"
             ellipse.setPen(QPen(Qt.black))
-            ellipse.setBrush(QBrush(self._job_color(self.people[self.selected_name].job)))
+            ellipse.setBrush(QBrush(self._job_color(job_sel)))
             rect.setBrush(QBrush(LABEL_BG))
         # Reset edges
         for edge in self.edge_items:
@@ -361,15 +382,20 @@ class GraphView(QGraphicsView):
             ai.setBrush(QBrush(EDGE_COLOR))
         # Reset neighbor node highlights
         for n, (e, l, r) in self.node_items.items():
+            person_n = self.people.get(n)
+            job_n = getattr(person_n, "job", "unknown") if person_n is not None else "unknown"
             e.setPen(QPen(Qt.black))
-            e.setBrush(QBrush(self._job_color(self.people[n].job)))
+            e.setBrush(QBrush(self._job_color(job_n)))
             r.setBrush(QBrush(LABEL_BG))
 
         self.selected_name = None
 
     def toggle_layout(self):
         self.use_networkx_layout = not self.use_networkx_layout
-        self._build_scene()
+        self.request_rebuild()
+
+    def request_rebuild(self):
+        self._rebuild_pending = True
 
     def _hierarchical_positions(self) -> dict[str, tuple[float, float]]:
         # Simple BFS-depth-based levels: root at 'you' if present, else first key
@@ -383,11 +409,14 @@ class GraphView(QGraphicsView):
         while q:
             cur = q.popleft()
             d = depth[cur]
-            for fr in self.people[cur].friends:
-                n = fr.name
-                if n not in depth:
+            person_cur = self.people.get(cur)
+            friends = getattr(person_cur, "friends", []) or []
+            for fr in friends:
+                n = getattr(fr, "name", None)
+                if isinstance(n, str) and n not in depth:
                     depth[n] = d + 1
-                    q.append(n)
+                    if n in self.people:
+                        q.append(n)
         # assign remaining (disconnected) to next depths
         rem = [n for n in names if n not in depth]
         while rem:
@@ -416,14 +445,26 @@ class GraphView(QGraphicsView):
         for name, person in self.people.items():
             G.add_node(name, job=person.job)
         for name, person in self.people.items():
-            for fr in person.friends:
-                G.add_edge(name, fr.name)
+            friends = getattr(person, "friends", []) or []
+            for fr in friends:
+                fname = getattr(fr, "name", None)
+                if isinstance(fname, str):
+                    G.add_edge(name, fname)
         return G
 
     def tick(self):
-        # Placeholder for periodic updates. For now, we just keep the scene.
-        # You can toggle layout mode dynamically or animate positions here.
-        pass
+        if getattr(self, "_rebuild_pending", False) and not getattr(self, "_building", False):
+            try:
+                self._build_scene()
+            except Exception:
+                # As a fallback, disable networkx layout and try once more
+                self.use_networkx_layout = False
+                try:
+                    self._build_scene()
+                except Exception:
+                    pass
+            finally:
+                self._rebuild_pending = False
 
 class MainWindow(QMainWindow):
     def __init__(self, people_dict: dict[str, Person]):
@@ -442,20 +483,27 @@ class MainWindow(QMainWindow):
         def on_enqueue():
             btn_enq.setEnabled(False)
             btn_deq.setEnabled(False)
-            new_name = f"p{len(self.queue_model.items)}"
-            self.queue_model.enqueue(new_name)
-            # Add dummy node to graph for demo
-            if new_name not in self.people:
-                # Create Person with job 'temp'
-                p = Person(new_name, "temp")
-                self.people[new_name] = p
-                # Link from currently selected node if exists, else from 'you' if exists
-                src_node = self.graph_view.selected_name if self.graph_view.selected_name else ("you" if "you" in self.people else None)
-                if src_node and src_node in self.people:
-                    self.people[src_node].friends.append(p)
-                self.graph_view._build_scene()
-            btn_enq.setEnabled(True)
-            btn_deq.setEnabled(True)
+            try:
+                new_name = f"p{len(self.queue_model.items)}"
+                self.queue_model.enqueue(new_name)
+                # Add dummy node to graph for demo
+                if new_name not in self.people:
+                    # Create Person with job 'temp'
+                    p = Person(new_name, "temp")
+                    self.people[new_name] = p
+                    # Link from currently selected node if exists, else from 'you' if exists
+                    src_node = self.graph_view.selected_name if self.graph_view.selected_name else ("you" if "you" in self.people else None)
+                    if src_node and src_node in self.people:
+                        src_person = self.people[src_node]
+                        current_friends = getattr(src_person, "friends", None)
+                        if not isinstance(current_friends, list):
+                            current_friends = list(current_friends or [])
+                            src_person.friends = current_friends
+                        src_person.friends.append(p)
+                self.graph_view.request_rebuild()
+            finally:
+                btn_enq.setEnabled(True)
+                btn_deq.setEnabled(True)
 
         btn_enq.clicked.connect(on_enqueue)
         btn_deq.clicked.connect(lambda: self.queue_model.dequeue())
@@ -471,14 +519,17 @@ class MainWindow(QMainWindow):
         # Right: graph view + inspector + toggle layout button
 
         right = QWidget()
-        right_vl = QVBoxLayout(right)
+        # Removed initial right_vl usage to avoid double adding
+        # right_vl = QVBoxLayout(right)
+        # right_vl.addWidget(btn_toggle_layout)
+        # right_vl.addWidget(self.graph_view)
+        # right_vl.addWidget(self.inspector)
+
         # Toolbar area for toggle button
         btn_toggle_layout = QPushButton("Toggle Layout")
         btn_toggle_layout.setToolTip("Toggle between NetworkX layout and Hierarchical layout")
-        right_vl.addWidget(btn_toggle_layout)
 
         self.graph_view = GraphView(people_dict)
-        right_vl.addWidget(self.graph_view)
 
         # Inspector widget below graph view
         self.inspector = QWidget()
@@ -490,7 +541,6 @@ class MainWindow(QMainWindow):
         inspector_layout.addWidget(self.label_job)
         inspector_layout.addWidget(QLabel("<b>Friends:</b>"))
         inspector_layout.addWidget(self.list_friends)
-        right_vl.addWidget(self.inspector)
 
         # Splitter vertical for graph + inspector in right panel
         right_splitter = QSplitter(Qt.Vertical)
@@ -498,7 +548,7 @@ class MainWindow(QMainWindow):
         right_splitter.addWidget(self.inspector)
         right_splitter.setSizes([400, 200])
 
-        # Replace right layout to include toggle button above splitter
+        # Use final right layout with toggle button above splitter
         right_layout = QVBoxLayout()
         right_layout.addWidget(btn_toggle_layout)
         right_layout.addWidget(right_splitter)
@@ -532,12 +582,16 @@ class MainWindow(QMainWindow):
         self.label_name.setText(f"<b>Name:</b> {person.name}")
         self.label_job.setText(f"<b>Job:</b> {person.job}")
         self.list_friends.clear()
-        for friend in person.friends:
-            item = QListWidgetItem(friend.name)
-            self.list_friends.addItem(item)
+        friends = getattr(person, "friends", []) or []
+        for friend in friends:
+            fname = getattr(friend, "name", None)
+            if isinstance(fname, str):
+                item = QListWidgetItem(fname)
+                self.list_friends.addItem(item)
 
 
 def main():
+    faulthandler.enable()
     app = QApplication(sys.argv)
     w = MainWindow(people)
     w.resize(1000, 640)
